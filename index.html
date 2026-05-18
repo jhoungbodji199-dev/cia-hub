@@ -14213,6 +14213,10 @@ function showPage(name) {
     if (el) { el.classList.add('active'); }
   }
 
+  // Couper le timer étude sur les pages de repos
+  const REST_PAGES = ['home','study-setup','exam-setup','stats-page','mock-home','mock-summary','summary','exam-summary-page'];
+  if (REST_PAGES.includes(name)) pauseTimer();
+
   if (name === 'home') { renderHome(); renderSidebar(); }
   if (name === 'study-setup') renderStudySetup();
   if (name === 'exam-setup') renderExamSetup();
