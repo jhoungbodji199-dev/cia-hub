@@ -629,14 +629,9 @@ var MOCK_DB = {
 var EXAM_DURATION    = 9000;
 var SK_SESSIONS      = 'cia_mock_sessions';
 var SK_HISTORY       = 'cia_mock_history';
-var DRIVE_FILE_NAME  = 'cia_mock_hub_data.json';
-
-// Google API config — user fills in their Client ID
-var GAPI_CLIENT_ID   = '351870287508-mpgb979e45hhe7r74kcjclhdtmfachfp.apps.googleusercontent.com';
-var GAPI_SCOPE       = 'https://www.googleapis.com/auth/drive.file';
-var gapiReady        = false;
-var driveFileId      = null;
-var driveUser        = null;
+var DRIVE_FILE_NAME  = 'cia_mock_hub_data.json'; // défini aussi dans la section Drive
+var gapiReady        = false; // conservé pour compatibilité
+var driveFileId      = null;  // géré dans la section Drive
 
 // ═══ STATE ═══════════════════════════════════════════════════════════
 var eState        = null;
@@ -1035,112 +1030,133 @@ function renderStats(){
   }).join('');
 }
 
-// ═══ GOOGLE DRIVE — OAuth2 Implicit Flow (zéro SDK externe) ═══════════
-// Principe : ouvre un popup Google OAuth → récupère le token via postMessage
-var driveAccessToken = null;
-var tokenClient = null; // inutilisé, conservé pour compatibilité
+// ═══ GOOGLE DRIVE — même implémentation que index.html ════════════════
+var GAPI_CLIENT_ID_DRIVE = '351870287508-mpgb979e45hhe7r74kcjclhdtmfachfp.apps.googleusercontent.com';
+var GAPI_SCOPE_DRIVE     = 'https://www.googleapis.com/auth/drive.file';
+var DRIVE_FILE_NAME      = 'cia_mock_hub_data.json';
+
+var driveTokenClient  = null;
+var driveAccessToken  = null;
+var driveFileId       = null;
+var driveUser         = null;
 var _pendingDriveAction = null;
 
-var OAUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
-var REDIRECT_URI = window.location.origin + window.location.pathname;
+function initGapi(){ /* chargement différé au premier clic */ }
 
-function initGapi(){ /* rien à faire — pas de SDK */ }
+/* ── Charger GIS + gapi en cascade, puis callback ── */
+function loadGoogleLibs(cb){
+  if(window.google && window.gapi){ cb(); return; }
+  var s1=document.createElement('script');
+  s1.src='https://accounts.google.com/gsi/client';
+  s1.onload=function(){
+    var s2=document.createElement('script');
+    s2.src='https://apis.google.com/js/api.js';
+    s2.onload=function(){
+      gapi.load('client',function(){
+        gapi.client.init({}).then(function(){
+          gapi.client.load('https://www.googleapis.com/discovery/v1/apis/drive/v3/rest').then(cb);
+        });
+      });
+    };
+    document.head.appendChild(s2);
+  };
+  document.head.appendChild(s1);
+}
 
-function _openOAuthPopup(action){
-  _pendingDriveAction = action;
-  var params = new URLSearchParams({
-    client_id: GAPI_CLIENT_ID,
-    redirect_uri: REDIRECT_URI,
-    response_type: 'token',
-    scope: GAPI_SCOPE,
-    include_granted_scopes: 'true',
-    prompt: 'select_account'
+function _initTokenClient(){
+  if(driveTokenClient) return;
+  driveTokenClient=google.accounts.oauth2.initTokenClient({
+    client_id: GAPI_CLIENT_ID_DRIVE,
+    scope: GAPI_SCOPE_DRIVE,
+    callback: function(resp){
+      if(resp.error){ showToast('Erreur auth: '+resp.error); return; }
+      driveAccessToken=resp.access_token;
+      gapi.client.setToken({access_token:driveAccessToken});
+      driveUser='Connecté';
+      document.getElementById('drive-info').textContent='Connecté \u2713';
+      document.getElementById('drive-btn-label').textContent='Drive \u2713';
+      showToast('Drive connecté \u2713');
+      if(_pendingDriveAction==='save') driveSave();
+      else if(_pendingDriveAction==='load') driveLoad();
+      _pendingDriveAction=null;
+    }
   });
-  var popup = window.open(OAUTH_URL+'?'+params.toString(),'_blank','width=500,height=600,left=200,top=100');
-  if(!popup){ showToast('Popup bloqué — autorisez les popups pour ce site'); return; }
-  // Surveiller le retour du popup (redirect vers la même page avec #access_token=...)
-  var poll = setInterval(function(){
-    try {
-      var href = popup.location.href;
-      if(href && href.indexOf(window.location.origin)===0){
-        clearInterval(poll);
-        popup.close();
-        var hash = href.split('#')[1]||'';
-        var params = {};
-        hash.split('&').forEach(function(p){ var kv=p.split('='); params[kv[0]]=kv[1]; });
-        if(params['access_token']){
-          driveAccessToken = params['access_token'];
-          driveUser = 'Connecté';
-          document.getElementById('drive-info').textContent = 'Connecté \u2713';
-          document.getElementById('drive-btn-label').textContent = 'Drive \u2713';
-          showToast('Drive connecté \u2713');
-          if(_pendingDriveAction==='save') _driveSaveNow();
-          else if(_pendingDriveAction==='load') _driveLoadNow();
-          _pendingDriveAction = null;
-        } else {
-          showToast('Auth annulée ou échouée');
-        }
-      }
-    } catch(e){ /* cross-origin — popup pas encore revenue */ }
-  }, 300);
-  // Timeout 2 minutes
-  setTimeout(function(){ clearInterval(poll); }, 120000);
 }
 
-function _getToken(action){
-  if(driveAccessToken){
-    _pendingDriveAction = action;
-    if(action==='save') _driveSaveNow();
-    else if(action==='load') _driveLoadNow();
-    return;
-  }
-  _openOAuthPopup(action);
+function driveSignIn(){
+  loadGoogleLibs(function(){
+    _initTokenClient();
+    driveTokenClient.requestAccessToken({prompt:''});
+  });
 }
-function onDriveSignedOut(){
-  driveUser=null; driveFileId=null; driveAccessToken=null;
+function driveAction(){
+  if(!driveAccessToken){ _pendingDriveAction='save'; driveSignIn(); }
+  else driveSave();
+}
+function driveSignOut(){
+  if(driveAccessToken && window.google) google.accounts.oauth2.revoke(driveAccessToken);
+  driveAccessToken=null; driveFileId=null; driveUser=null; driveTokenClient=null;
   document.getElementById('drive-info').textContent='Non connecté';
   document.getElementById('drive-btn-label').textContent='Drive';
+  showToast('Déconnecté de Drive');
 }
-function driveAction(){ _getToken('save'); }
-function driveSignIn(){ _getToken('save'); }
-function driveSignOut(){ driveAccessToken=null; driveUser=null; onDriveSignedOut(); showToast('Déconnecté de Drive'); }
-function driveSave(){ _getToken('save'); }
-function driveLoad(){ _getToken('load'); }
-function _driveSaveNow(){
+
+function driveSave(){
+  if(!driveAccessToken){ _pendingDriveAction='save'; driveSignIn(); return; }
+  showToast('Sauvegarde en cours\u2026');
   var data=JSON.stringify({history:loadHistory(),sessions:loadSessions(),savedAt:new Date().toISOString()});
-  var meta={name:DRIVE_FILE_NAME,mimeType:'application/json'};
-  var body='--boundary\r\nContent-Type: application/json\r\n\r\n'+JSON.stringify(meta)+
-    '\r\n--boundary\r\nContent-Type: application/json\r\n\r\n'+data+'\r\n--boundary--';
-  var method='POST', url='https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
-  if(driveFileId){method='PATCH';url='https://www.googleapis.com/upload/drive/v3/files/'+driveFileId+'?uploadType=multipart';}
-  fetch(url,{method:method,headers:{'Authorization':'Bearer '+driveAccessToken,'Content-Type':'multipart/related; boundary=boundary'},body:body})
-    .then(function(r){return r.json();})
-    .then(function(f){
-      if(f.error){ showToast('Erreur Drive: '+f.error.message); driveAccessToken=null; return; }
-      if(f.id) driveFileId=f.id;
-      showToast('Sauvegardé sur Drive \u2713');
-    })
-    .catch(function(e){showToast('Erreur Drive: '+e.message); driveAccessToken=null;});
+  var blob=new Blob([data],{type:'application/json'});
+  driveFindFile().then(function(id){
+    var p;
+    if(id){
+      p=fetch('https://www.googleapis.com/upload/drive/v3/files/'+id+'?uploadType=media',{
+        method:'PATCH',
+        headers:{Authorization:'Bearer '+driveAccessToken,'Content-Type':'application/json'},
+        body:blob
+      });
+    } else {
+      var meta={name:DRIVE_FILE_NAME,mimeType:'application/json'};
+      var form=new FormData();
+      form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));
+      form.append('file',blob);
+      p=fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',{
+        method:'POST',
+        headers:{Authorization:'Bearer '+driveAccessToken},
+        body:form
+      }).then(function(r){return r.json();}).then(function(f){driveFileId=f.id;});
+    }
+    return p;
+  }).then(function(){showToast('Sauvegardé sur Drive \u2713');})
+    .catch(function(e){showToast('Erreur Drive: '+e.message);});
 }
-function _driveLoadNow(){
-  fetch("https://www.googleapis.com/drive/v3/files?q=name%3D'"+DRIVE_FILE_NAME+"'&spaces=drive&fields=files(id,name,modifiedTime)",
-    {headers:{'Authorization':'Bearer '+driveAccessToken}})
-    .then(function(r){return r.json();})
-    .then(function(res){
-      if(res.error){ showToast('Erreur Drive: '+res.error.message); driveAccessToken=null; return null; }
-      if(!res.files||!res.files.length){showToast('Aucune sauvegarde trouvée.');return null;}
-      driveFileId=res.files[0].id;
-      return fetch('https://www.googleapis.com/drive/v3/files/'+driveFileId+'?alt=media',{headers:{'Authorization':'Bearer '+driveAccessToken}});
-    })
-    .then(function(r){return r?r.json():null;})
-    .then(function(data){
-      if(!data) return;
-      if(Array.isArray(data.history)) saveHistory(data.history);
-      if(data.sessions&&typeof data.sessions==='object') saveSessions(data.sessions);
-      showToast('Restauré depuis Drive \u2713 ('+new Date(data.savedAt).toLocaleString('fr-FR')+')');
-      renderHome();
-    })
-    .catch(function(e){showToast('Erreur Drive: '+e.message); driveAccessToken=null;});
+
+function driveLoad(){
+  if(!driveAccessToken){ _pendingDriveAction='load'; driveSignIn(); return; }
+  showToast('Restauration en cours\u2026');
+  driveFindFile().then(function(id){
+    if(!id){showToast('Aucune sauvegarde trouvée.');return null;}
+    return fetch('https://www.googleapis.com/drive/v3/files/'+id+'?alt=media',{
+      headers:{Authorization:'Bearer '+driveAccessToken}
+    }).then(function(r){return r.json();});
+  }).then(function(data){
+    if(!data) return;
+    if(Array.isArray(data.history)) saveHistory(data.history);
+    if(data.sessions&&typeof data.sessions==='object') saveSessions(data.sessions);
+    showToast('Restauré depuis Drive \u2713 ('+new Date(data.savedAt).toLocaleString('fr-FR')+')');
+    renderHome();
+  }).catch(function(e){showToast('Erreur Drive: '+e.message);});
+}
+
+function driveFindFile(){
+  if(driveFileId) return Promise.resolve(driveFileId);
+  return gapi.client.drive.files.list({
+    q:"name='"+DRIVE_FILE_NAME+"' and trashed=false",
+    fields:'files(id,name)',spaces:'drive'
+  }).then(function(resp){
+    var files=resp.result.files;
+    if(files&&files.length){driveFileId=files[0].id; return driveFileId;}
+    return null;
+  });
 }
 
 // ═══ PAGE ROUTER ══════════════════════════════════════════════════════
