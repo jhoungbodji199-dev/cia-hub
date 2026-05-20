@@ -633,7 +633,7 @@ var SK_HISTORY       = 'cia_mock_history';
 var DRIVE_FILE_NAME  = 'cia_mock_hub_data.json';
 
 // Google API config — user fills in their Client ID
-var GAPI_CLIENT_ID   = '351870287508-mpgb979e45hhe7r74kcjclhdtmfachfp.apps.googleusercontent.com';   // Set your OAuth client ID here
+var GAPI_CLIENT_ID   = '';   // Set your OAuth client ID here
 var GAPI_SCOPE       = 'https://www.googleapis.com/auth/drive.file';
 var gapiReady        = false;
 var driveFileId      = null;
@@ -1037,18 +1037,33 @@ function renderStats(){
 }
 
 // ═══ GOOGLE DRIVE ═════════════════════════════════════════════════════
+var gapiInitCalled=false;
 function initGapi(){
   if(!GAPI_CLIENT_ID){
     document.getElementById('drive-info').textContent='Client ID non configuré';
     return;
   }
+  if(typeof gapi==='undefined'){
+    var attempts=0;
+    var poll=setInterval(function(){
+      attempts++;
+      if(typeof gapi!=='undefined'){clearInterval(poll);_doInitGapi();}
+      else if(attempts>50){clearInterval(poll);console.warn('gapi script never loaded');}
+    },300);
+    return;
+  }
+  _doInitGapi();
+}
+function _doInitGapi(){
+  if(gapiInitCalled) return;
+  gapiInitCalled=true;
   gapi.load('client:auth2',function(){
     gapi.client.init({clientId:GAPI_CLIENT_ID,scope:GAPI_SCOPE,plugin_name:'mock_hub'}).then(function(){
       gapiReady=true;
       var auth=gapi.auth2.getAuthInstance();
       if(auth.isSignedIn.get()) onDriveSignedIn();
       auth.isSignedIn.listen(function(signed){if(signed) onDriveSignedIn(); else onDriveSignedOut()});
-    }).catch(function(e){console.warn('Drive init failed',e)});
+    }).catch(function(e){console.warn('Drive init failed',e);gapiInitCalled=false;});
   });
 }
 function onDriveSignedIn(){
@@ -1063,8 +1078,18 @@ function onDriveSignedOut(){
 }
 function driveAction(){if(!gapiReady||!driveUser) driveSignIn(); else driveSave()}
 function driveSignIn(){
-  if(!GAPI_CLIENT_ID){showToast('Configurez un Client ID OAuth.');return}
-  if(!gapiReady){showToast('API Drive en cours de chargement...');return}
+  if(!GAPI_CLIENT_ID){showToast("Client ID OAuth non configuré.");return}
+  if(!gapiReady){
+    showToast("Connexion Drive en cours...");
+    if(!gapiInitCalled) initGapi();
+    var tries=0;
+    var wait=setInterval(function(){
+      tries++;
+      if(gapiReady){clearInterval(wait);gapi.auth2.getAuthInstance().signIn();}
+      else if(tries>15){clearInterval(wait);showToast("Impossible de charger Drive.");}
+    },500);
+    return;
+  }
   gapi.auth2.getAuthInstance().signIn();
 }
 function driveSignOut(){if(gapiReady) gapi.auth2.getAuthInstance().signOut()}
