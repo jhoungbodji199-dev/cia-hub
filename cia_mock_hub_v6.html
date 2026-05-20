@@ -4,8 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mock Exam Hub — CIA Part 1</title>
-<!-- Google Identity Services (Drive API) -->
-<script src="https://accounts.google.com/gsi/client"></script>
+<!-- Google Identity Services chargé dynamiquement dans le JS -->
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -1036,46 +1035,66 @@ function renderStats(){
   }).join('');
 }
 
-// ═══ GOOGLE DRIVE (Google Identity Services) ═══════════════════════════
-// Nouvelle API GIS — remplace gapi.auth2 déprécié depuis 2023
+// ═══ GOOGLE DRIVE — OAuth2 Implicit Flow (zéro SDK externe) ═══════════
+// Principe : ouvre un popup Google OAuth → récupère le token via postMessage
 var driveAccessToken = null;
-var tokenClient = null;
-var _pendingDriveAction = null; // 'save' | 'load'
+var tokenClient = null; // inutilisé, conservé pour compatibilité
+var _pendingDriveAction = null;
 
-function initGapi(){
-  if(!GAPI_CLIENT_ID){ document.getElementById('drive-info').textContent='Client ID non configuré'; return; }
-  if(typeof google==='undefined'||!google.accounts){
-    // Script GIS pas encore chargé — on retente dans 500ms
-    setTimeout(initGapi, 500); return;
-  }
-  // Initialiser le token client GIS (pas besoin de gapi.load)
-  tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: GAPI_CLIENT_ID,
-    scope: GAPI_SCOPE,
-    callback: function(resp){
-      if(resp.error){ showToast('Erreur auth: '+resp.error); return; }
-      driveAccessToken = resp.access_token;
-      driveUser = 'Connecté';
-      document.getElementById('drive-info').textContent = 'Connecté \u2713';
-      document.getElementById('drive-btn-label').textContent = 'Drive \u2713';
-      // Exécuter l'action en attente
-      if(_pendingDriveAction==='save') _driveSaveNow();
-      else if(_pendingDriveAction==='load') _driveLoadNow();
-      _pendingDriveAction = null;
-    }
-  });
-}
-function _getToken(action){
+var OAUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+var REDIRECT_URI = window.location.origin + window.location.pathname;
+
+function initGapi(){ /* rien à faire — pas de SDK */ }
+
+function _openOAuthPopup(action){
   _pendingDriveAction = action;
-  if(!tokenClient){ showToast('Drive non initialisé, patientez...'); setTimeout(function(){_getToken(action);},800); return; }
-  // Si token valide → action directe
+  var params = new URLSearchParams({
+    client_id: GAPI_CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    response_type: 'token',
+    scope: GAPI_SCOPE,
+    include_granted_scopes: 'true',
+    prompt: 'select_account'
+  });
+  var popup = window.open(OAUTH_URL+'?'+params.toString(),'_blank','width=500,height=600,left=200,top=100');
+  if(!popup){ showToast('Popup bloqué — autorisez les popups pour ce site'); return; }
+  // Surveiller le retour du popup (redirect vers la même page avec #access_token=...)
+  var poll = setInterval(function(){
+    try {
+      var href = popup.location.href;
+      if(href && href.indexOf(window.location.origin)===0){
+        clearInterval(poll);
+        popup.close();
+        var hash = href.split('#')[1]||'';
+        var params = {};
+        hash.split('&').forEach(function(p){ var kv=p.split('='); params[kv[0]]=kv[1]; });
+        if(params['access_token']){
+          driveAccessToken = params['access_token'];
+          driveUser = 'Connecté';
+          document.getElementById('drive-info').textContent = 'Connecté \u2713';
+          document.getElementById('drive-btn-label').textContent = 'Drive \u2713';
+          showToast('Drive connecté \u2713');
+          if(_pendingDriveAction==='save') _driveSaveNow();
+          else if(_pendingDriveAction==='load') _driveLoadNow();
+          _pendingDriveAction = null;
+        } else {
+          showToast('Auth annulée ou échouée');
+        }
+      }
+    } catch(e){ /* cross-origin — popup pas encore revenue */ }
+  }, 300);
+  // Timeout 2 minutes
+  setTimeout(function(){ clearInterval(poll); }, 120000);
+}
+
+function _getToken(action){
   if(driveAccessToken){
+    _pendingDriveAction = action;
     if(action==='save') _driveSaveNow();
     else if(action==='load') _driveLoadNow();
     return;
   }
-  // Sinon demander un token (ouvre popup Google)
-  tokenClient.requestAccessToken({prompt:'select_account'});
+  _openOAuthPopup(action);
 }
 function onDriveSignedOut(){
   driveUser=null; driveFileId=null; driveAccessToken=null;
@@ -1096,7 +1115,11 @@ function _driveSaveNow(){
   if(driveFileId){method='PATCH';url='https://www.googleapis.com/upload/drive/v3/files/'+driveFileId+'?uploadType=multipart';}
   fetch(url,{method:method,headers:{'Authorization':'Bearer '+driveAccessToken,'Content-Type':'multipart/related; boundary=boundary'},body:body})
     .then(function(r){return r.json();})
-    .then(function(f){if(f.id) driveFileId=f.id; showToast('Sauvegardé sur Drive \u2713');})
+    .then(function(f){
+      if(f.error){ showToast('Erreur Drive: '+f.error.message); driveAccessToken=null; return; }
+      if(f.id) driveFileId=f.id;
+      showToast('Sauvegardé sur Drive \u2713');
+    })
     .catch(function(e){showToast('Erreur Drive: '+e.message); driveAccessToken=null;});
 }
 function _driveLoadNow(){
@@ -1104,6 +1127,7 @@ function _driveLoadNow(){
     {headers:{'Authorization':'Bearer '+driveAccessToken}})
     .then(function(r){return r.json();})
     .then(function(res){
+      if(res.error){ showToast('Erreur Drive: '+res.error.message); driveAccessToken=null; return null; }
       if(!res.files||!res.files.length){showToast('Aucune sauvegarde trouvée.');return null;}
       driveFileId=res.files[0].id;
       return fetch('https://www.googleapis.com/drive/v3/files/'+driveFileId+'?alt=media',{headers:{'Authorization':'Bearer '+driveAccessToken}});
@@ -1161,7 +1185,6 @@ function showToast(msg){
 
 // ═══ INIT ═════════════════════════════════════════════════════════════
 document.getElementById('exam-topbar').style.display='none';
-initGapi();
 renderHome();
 </script>
 </body>
