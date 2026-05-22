@@ -15494,7 +15494,7 @@ renderSidebar();
 const DRIVE_CLIENT_ID = '351870287508-mpgb979e45hhe7r74kcjclhdtmfachfp.apps.googleusercontent.com';
 const DRIVE_SCOPES    = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_FILE_NAME = 'cia-hub-backup.json';
-const DRIVE_LS_KEYS   = ['domainProgress','sectionHistory','examHistory','cia_mock_sessions','cia_mock_history'];
+const DRIVE_LS_KEYS   = ['cia_daquin_v2','cia_mock_sessions','cia_mock_history','cia_study_session','cia_exam_session'];
 
 let driveTokenClient = null;
 let driveAccessToken = null;
@@ -15637,12 +15637,11 @@ async function driveRestore() {
     DRIVE_LS_KEYS.forEach(k => { if (data[k]) localStorage.setItem(k, data[k]); });
 
     const ts = data._savedAt ? new Date(data._savedAt).toLocaleString('fr-FR') : '—';
-    driveSetStatus('green', '✅ Restauré (sauvegarde du ' + ts + ')');
-    document.getElementById('drive-last-sync').textContent = 'Sauvegarde du : ' + ts;
+    localStorage.setItem('driveSyncTs', ts);
+    driveSetStatus('green', '✅ Restauré (sauvegarde du ' + ts + ') — rechargement…');
 
-    // Rafraîchir l'affichage
-    renderHome(); renderSidebar();
-    goHome();
+    // Recharger la page pour que tout l'état soit relu depuis localStorage
+    setTimeout(() => location.reload(), 900);
   } catch (e) {
     driveSetStatus('red', '❌ Erreur : ' + e.message);
   }
