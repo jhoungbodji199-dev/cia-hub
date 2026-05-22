@@ -1084,6 +1084,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
     </div>
   </div>
 </div>
+<!-- ── MODAL : REVIEW D'UNE SESSION ── -->
+<div id="review-modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;align-items:flex-start;justify-content:center;padding:24px 12px;overflow-y:auto" onclick="closeReviewModal()">
+  <div style="background:var(--bg);border:1px solid var(--border);border-radius:16px;width:100%;max-width:700px;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 20px 60px #000a;margin:auto" onclick="event.stopPropagation()">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <div id="review-modal-title" style="font-size:15px;font-weight:700">👁 Révision de session</div>
+      <button onclick="closeReviewModal()" style="background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:18px;width:30px;height:30px;cursor:pointer;line-height:1">×</button>
+    </div>
+    <div id="review-modal-body" style="overflow-y:auto;flex:1;padding:16px 20px"></div>
+  </div>
+</div>
+
 </div><!-- /app -->
 
 <script>
@@ -13924,7 +13935,10 @@ function saveState() {
   } catch(e) {}
 }
 
-// ─── PERSIST STUDY SESSION ───
+// ─── PERSIST STUDY SESSION (multi-clé par domain+section) ───
+function _studySessionKey(domain, section) {
+  return 'cia_study_sess__' + (domain || '') + '__' + (section == null ? 'null' : section);
+}
 function saveStudySession() {
   try {
     if (!state.studyDomain || !state.studyQueue.length) return;
@@ -13935,15 +13949,39 @@ function saveStudySession() {
       idx: state.studyIdx,
       answers: state.studyAnswers
     };
-    localStorage.setItem('cia_study_session', JSON.stringify(ss));
+    localStorage.setItem(_studySessionKey(state.studyDomain, state.studySection), JSON.stringify(ss));
   } catch(e) {}
 }
 function clearStudySession() {
+  // Efface uniquement la session du domaine/section courant
+  localStorage.removeItem(_studySessionKey(state.studyDomain, state.studySection));
+  // Compatibilité : effacer aussi l'ancienne clé unique si elle traîne
   localStorage.removeItem('cia_study_session');
+}
+function clearStudySessionFor(domain, section) {
+  localStorage.removeItem(_studySessionKey(domain, section));
 }
 function loadStudySession() {
   try {
-    const raw = localStorage.getItem('cia_study_session');
+    // Cherche la session pour le domaine+section courant
+    const raw = localStorage.getItem(_studySessionKey(state.studyDomain, state.studySection));
+    if (!raw) {
+      // Migration : tenter l'ancienne clé unique si même domain+section
+      const legacy = localStorage.getItem('cia_study_session');
+      if (!legacy) return null;
+      const ss = JSON.parse(legacy);
+      if (!ss.domain || !ss.queueIds || !ss.queueIds.length) return null;
+      if (ss.domain === state.studyDomain && ss.section === state.studySection) return ss;
+      return null;
+    }
+    const ss = JSON.parse(raw);
+    if (!ss.domain || !ss.queueIds || !ss.queueIds.length) return null;
+    return ss;
+  } catch(e) { return null; }
+}
+function loadStudySessionFor(domain, section) {
+  try {
+    const raw = localStorage.getItem(_studySessionKey(domain, section));
     if (!raw) return null;
     const ss = JSON.parse(raw);
     if (!ss.domain || !ss.queueIds || !ss.queueIds.length) return null;
@@ -13982,7 +14020,14 @@ function resetAll() {
   localStorage.removeItem('cia_daquin_v2');
   localStorage.removeItem('cia_mock_history');
   localStorage.removeItem('cia_mock_sessions');
-  clearStudySession();
+  localStorage.removeItem('cia_study_session'); // ancienne clé unique
+  // Nettoyer toutes les clés multi-session
+  const keysToDelete = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith('cia_study_sess__')) keysToDelete.push(k);
+  }
+  keysToDelete.forEach(k => localStorage.removeItem(k));
   clearExamSession();
   state.history = [];
   state.sectionHistory = {};
@@ -14485,6 +14530,104 @@ function buildSparkline(scores, color) {
 }
 
 // ─── DELETE SECTION HISTORY ENTRY ────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+//  SESSION REVIEW (👁)
+// ═══════════════════════════════════════════════════════════════
+function openSessionReview(key, entryIdx) {
+  const hist = state.sectionHistory[key];
+  if (!hist || !hist[entryIdx]) return;
+  const entry = hist[entryIdx];
+  if (!entry.queueIds || !entry.answers) return;
+
+  const idMap = Object.fromEntries(QUESTION_DB.map(q => [q.id, q]));
+  const [, domain, sectionStr] = key.split('_');
+  const sec = sectionStr === 'null' ? null : parseInt(sectionStr);
+  const dom = SYLLABUS[domain];
+  const secLabel = sec && dom ? dom.sections[sec-1] : 'Tout le domaine';
+  const d = new Date(entry.date);
+  const dateStr = d.toLocaleDateString('fr-FR', {day:'2-digit',month:'2-digit',year:'2-digit'}) + ' ' + d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
+
+  document.getElementById('review-modal-title').innerHTML =
+    '<span class="q-tag ' + domain + '" style="font-size:10px;margin-right:8px">' + domain + '</span>' +
+    secLabel + ' · ' + dateStr + ' · ' +
+    '<span style="color:' + (entry.pct>=75?'var(--correct)':'var(--wrong)') + '">' + entry.pct + '%</span>';
+
+  let html = '';
+  entry.queueIds.forEach((qid, qi) => {
+    const q = idMap[qid];
+    if (!q) return;
+    const ans = entry.answers[qi];
+    const chosen = ans ? ans.chosen : null;
+    const isCorrect = ans ? ans.correct : null;
+
+    // Trouver la bonne réponse
+    let correctLetter = null;
+    if (q.answer) {
+      correctLetter = q.answer.toUpperCase();
+    } else if (q.choices) {
+      // chercher via explanation si pas de q.answer direct
+    }
+
+    const statusIcon = !chosen ? '⬜' : (isCorrect ? '✅' : '❌');
+    const statusColor = !chosen ? 'var(--muted)' : (isCorrect ? 'var(--correct)' : 'var(--wrong)');
+
+    html += '<div style="border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px;background:var(--surface)">';
+    // En-tête question
+    html += '<div style="display:flex;gap:10px;align-items:flex-start;margin-bottom:10px">';
+    html += '<span style="font-size:18px;flex-shrink:0">' + statusIcon + '</span>';
+    html += '<div style="font-size:13px;font-weight:600;color:var(--fg);line-height:1.5">' + (qi+1) + '. ' + q.text + '</div>';
+    html += '</div>';
+
+    // Choices
+    if (q.choices) {
+      html += '<div style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px;padding-left:28px">';
+      q.choices.forEach(ch => {
+        const letter = ch.letter.toUpperCase();
+        const isChosen = chosen && chosen.toUpperCase() === letter;
+        const isRight = correctLetter && letter === correctLetter;
+        let bg = 'transparent';
+        let border = '1px solid var(--border)';
+        let color = 'var(--muted)';
+        if (isRight) { bg = 'rgba(39,174,96,.13)'; border = '1px solid var(--correct)'; color = 'var(--correct)'; }
+        if (isChosen && !isRight) { bg = 'rgba(231,76,60,.13)'; border = '1px solid var(--wrong)'; color = 'var(--wrong)'; }
+        html += '<div style="padding:6px 10px;border-radius:7px;font-size:12px;background:' + bg + ';border:' + border + ';color:' + color + '">';
+        html += '<strong>' + letter + '.</strong> ' + ch.text;
+        if (isChosen && !isRight) html += ' <span style="font-size:11px;opacity:.8">← ton choix</span>';
+        if (isRight) html += ' <span style="font-size:11px;opacity:.8">← bonne réponse</span>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+
+    // Explication
+    if (q.explanation) {
+      let expHtml = '';
+      if (typeof q.explanation === 'string') {
+        expHtml = q.explanation;
+      } else if (typeof q.explanation === 'object') {
+        // objet {A,B,C,D}
+        Object.entries(q.explanation).forEach(([k, v]) => {
+          expHtml += '<div style="margin-bottom:4px"><strong>' + k + '.</strong> ' + v + '</div>';
+        });
+      }
+      html += '<div style="padding:10px 12px;border-radius:7px;background:rgba(255,255,255,.04);border-left:3px solid var(--accent);margin-left:28px">';
+      html += '<div style="font-size:11px;color:var(--accent);font-weight:700;margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">Explication</div>';
+      html += '<div style="font-size:12px;color:var(--muted);line-height:1.6">' + expHtml + '</div>';
+      html += '</div>';
+    }
+
+    html += '</div>';
+  });
+
+  document.getElementById('review-modal-body').innerHTML = html;
+  const backdrop = document.getElementById('review-modal-backdrop');
+  backdrop.style.display = 'flex';
+}
+
+function closeReviewModal() {
+  document.getElementById('review-modal-backdrop').style.display = 'none';
+}
+
 function deleteHistoryEntry(key, idx, context) {
   const hist = state.sectionHistory[key];
   if (!hist || !hist[idx]) return;
@@ -14567,11 +14710,13 @@ function renderStudySummary(domain, section, newPct, newCorrect, newTotal) {
     const d = new Date(h.date);
     const dateStr = d.toLocaleDateString('fr-FR', {day:'2-digit',month:'2-digit',year:'2-digit'}) + ' ' + d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
     const durStr = h.durationSec ? fmtTimeHM(h.durationSec) : '—';
+    const hasReview = h.queueIds && h.answers && Object.keys(h.answers).length > 0;
     tableHtml += '<div style="display:flex;align-items:center;gap:6px;font-size:12px;padding:4px 0;border-top:1px solid var(--border)">' +
       '<span style="color:var(--muted);flex:1;min-width:0">' + dateStr + '</span>' +
       '<span style="color:var(--muted);width:36px;text-align:right">' + h.correct + '/' + h.total + '</span>' +
       '<span style="color:var(--muted);width:34px;text-align:right">' + durStr + '</span>' +
       '<span style="font-weight:700;width:38px;text-align:right;color:' + (h.pct>=75?'var(--correct)':'var(--wrong)') + '">' + h.pct + '%</span>' +
+      (hasReview ? '<button onclick="openSessionReview(\'' + key + '\',' + i + ')" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:15px;padding:0 2px;line-height:1" title="Parcourir les questions">👁</button>' : '<span style="width:19px;display:inline-block"></span>') +
       '<button onclick="deleteHistoryEntry(\'' + key + '\',' + i + ',\'summary\')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;padding:0 2px;line-height:1" title="Supprimer">×</button>' +
       '</div>';
   });
@@ -14594,7 +14739,16 @@ function endStudy() {
     const key = 'D_' + state.studyDomain + '_' + state.studySection;
     if (!state.sectionHistory[key]) state.sectionHistory[key] = [];
     const _sessionDur = state._lastSessionDur || 0;
-    if (!state._reviewMode) { state.sectionHistory[key].unshift({ date: new Date().toISOString(), pct, correct, total, durationSec: _sessionDur }); }
+    if (!state._reviewMode) {
+      // Stocker aussi queueIds et answers pour la review
+      state.sectionHistory[key].unshift({
+        date: new Date().toISOString(),
+        pct, correct, total,
+        durationSec: _sessionDur,
+        queueIds: state.studyQueue.map(q => q.id),
+        answers: JSON.parse(JSON.stringify(state.studyAnswers))
+      });
+    }
     state.sectionHistory[key] = state.sectionHistory[key].slice(0, 15);
     state._lastSessionDur = 0;
     saveState();
@@ -14960,15 +15114,17 @@ function renderStats() {
           const d = new Date(h.date);
           const dateStr = d.toLocaleDateString('fr-FR', {day:'2-digit',month:'2-digit',year:'2-digit'}) + ' ' + d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
           const durStr = h.durationSec ? fmtTimeHM(h.durationSec) : '—';
+          const hasReview = h.queueIds && h.answers && Object.keys(h.answers).length > 0;
           shHtml += '<div style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 0;border-top:1px solid var(--border)">' +
             '<span style="color:var(--muted);flex:1">' + dateStr + '</span>' +
             '<span style="color:var(--muted);width:36px;text-align:right">' + h.correct + '/' + h.total + '</span>' +
             '<span style="color:var(--muted);width:34px;text-align:right">' + durStr + '</span>' +
             '<span style="font-weight:700;width:38px;text-align:right;color:' + (h.pct>=75?'var(--correct)':'var(--wrong)') + '">' + h.pct + '%</span>' +
-            '<button onclick="deleteHistoryEntry(\'' + key + '\',' + i + ',\'stats\')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;padding:0 2px" title="Supprimer">×</button>' +
+            (hasReview ? '<button onclick="openSessionReview(\''+key+'\','+i+')" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:15px;padding:0 2px;line-height:1" title="Parcourir les questions">👁</button>' : '<span style="width:19px;display:inline-block"></span>') +
+            '<button onclick="deleteHistoryEntry(\''+key+'\','+i+',\'stats\')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;padding:0 2px" title="Supprimer">×</button>' +
             '</div>';
         });
-        shHtml += '</div>';
+             shHtml += '</div>';
       }
       studyHistContainer.innerHTML = shHtml;
     }
