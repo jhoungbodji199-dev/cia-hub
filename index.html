@@ -13929,7 +13929,7 @@ function saveState() {
     localStorage.setItem('cia_daquin_v2', JSON.stringify({
       history: state.history,
       totalTimeSec: (isFinite(state.totalTimeSec) && state.totalTimeSec >= 0) ? state.totalTimeSec : 0,
-      sessionLog: state.sessionLog.slice(-50),
+      sessionLog: state.sessionLog.slice(-1000),
       sectionHistory: state.sectionHistory
     }));
   } catch(e) {}
@@ -14646,7 +14646,7 @@ function deleteHistoryEntry(key, idx, context) {
     }
   }
   state.sessionLog.sort((a,b) => new Date(b.date) - new Date(a.date));
-  state.sessionLog = state.sessionLog.slice(0, 50);
+  state.sessionLog = state.sessionLog.slice(0, 1000);
   saveState();
   renderSidebar();
   // Re-render the appropriate context
@@ -15178,11 +15178,15 @@ function renderStats() {
     if (hist.length === 0) continue;
     totalMockPassed++;
     const best = Math.max(...hist.map(h => h.pct));
-    mockHtml += `<div style="margin-bottom:16px"><div style="font-size:12px;font-weight:700;margin-bottom:6px;color:var(--muted)">${m.title || id} — ${hist.length} passage(s) · Meilleur : <span style="color:${best>=75?'var(--correct)':best>=60?'#f59e0b':'var(--incorrect)'}">${best}%</span></div>`;
+    mockHtml += `<div style="margin-bottom:16px"><div style="font-size:12px;font-weight:700;margin-bottom:6px;color:var(--muted)">${m.title || id} — <span style="color:#f97316">${hist.length} tentative(s)</span> · Meilleur : <span style="color:${best>=75?'var(--correct)':best>=60?'#f59e0b':'var(--incorrect)'}">${best}%</span></div>`;
     for (const h of hist) {
       const cls = h.pct >= 75 ? 'good' : h.pct >= 60 ? 'mid' : 'bad';
       const hidx = hist.indexOf(h);
-      mockHtml += `<div class="mock-hist-row"><span class="mock-hist-badge">${h.date}</span><span style="font-size:12px;color:var(--muted)">${h.correct}✓ · ${h.incorrect}✗ · ${h.skipped||0} skip</span><span style="font-size:12px;color:var(--muted2);margin-left:4px">${mockFmtTime(h.timeSec||0)}</span><span class="mock-hist-pct ${cls}">${h.pct}%</span>${h.mockLog ? `<button onclick="openMockDetail('${id}',${hidx})" style="padding:4px 9px;border-radius:7px;border:1px solid var(--border);background:var(--surface);cursor:pointer;font-size:12px;color:var(--text);margin-left:4px">📋 Détail</button>` : ''}<button onclick="deleteMockHistoryEntry('${id}',${hidx})" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;padding:0 4px;margin-left:4px" title="Supprimer">×</button></div>`;
+      const wrongN = (h.incorrect || 0) + (h.skipped || 0);
+      const retryBtn = (h.mockLog && wrongN > 0)
+        ? `<button onclick="mockRetryFromHistory('${id}',${hidx})" style="padding:4px 9px;border-radius:7px;border:1px solid rgba(249,115,22,.5);background:rgba(249,115,22,.08);cursor:pointer;font-size:12px;color:#f97316;margin-left:4px" title="Reprendre les ${wrongN} ratés">🎯 Ratés</button>`
+        : '';
+      mockHtml += `<div class="mock-hist-row"><span class="mock-hist-badge">${h.date}</span><span style="font-size:12px;color:var(--muted)">${h.correct}✓ · ${h.incorrect}✗ · ${h.skipped||0} skip</span><span style="font-size:12px;color:var(--muted2);margin-left:4px">${mockFmtTime(h.timeSec||0)}</span><span class="mock-hist-pct ${cls}">${h.pct}%</span>${h.mockLog ? `<button onclick="openMockDetail('${id}',${hidx})" style="padding:4px 9px;border-radius:7px;border:1px solid var(--border);background:var(--surface);cursor:pointer;font-size:12px;color:var(--text);margin-left:4px">📋 Détail</button>` : ''}${retryBtn}<button onclick="deleteMockHistoryEntry('${id}',${hidx})" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;padding:0 4px;margin-left:4px" title="Supprimer">×</button></div>`;
     }
     mockHtml += '</div>';
   }
@@ -15269,9 +15273,44 @@ function renderMockDetailList() {
   }).join('');
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  EXAM DETAIL MODAL
-// ═══════════════════════════════════════════════════════════════
+// ── Relancer une session "ratés" depuis l'historique d'un mock terminé
+function mockRetryFromHistory(mockId, idx) {
+  const hist = getMockHistory(mockId);
+  const h = hist[idx];
+  if (!h || !h.mockLog) { alert('Détail indisponible pour ce passage.'); return; }
+  const wrong = h.mockLog.filter(q => q.given !== q.answer);
+  if (!wrong.length) { alert('Aucune question ratée dans ce passage !'); return; }
+  if (!confirm('Relancer une session avec les ' + wrong.length + ' question(s) ratée(s) de ce passage ?\n(Cette session de révision ne crée pas de nouvelle entrée d\'historique.)')) return;
+  // Fermer le modal détail s'il est ouvert
+  const bd = document.getElementById('mock-detail-backdrop');
+  if (bd) bd.style.display = 'none';
+
+  const m = MOCK_DB[mockId] || { title: mockId };
+  // Reconstruire des objets question complets à partir du mockLog
+  const questions = wrong.map(q => ({
+    id: q.id,
+    text: q.text,
+    tableHtml: q.tableHtml || null,
+    choices: q.choices,
+    answer: q.answer,
+    explanation: q.explanation || ''
+  }));
+
+  mState.mockId = mockId;
+  mState.questions = questions;
+  mState.reviewMode = false;
+  mState.retryWrongIds = questions.map((_, i) => i); // flag "retry" => pas d'entrée d'historique
+  mState.idx = 0;
+  mState.answers = {};
+  mState.revealed = {};
+  mState.timerSec = MOCK_DURATION;
+  mState._sessionElapsed = 0;
+
+  mockStartTimer();
+  showPage('mock-mode');
+  mockRender();
+}
+
 let _edmIdx = null;
 let _edmFilter = 'all';
 
@@ -15432,7 +15471,7 @@ function pauseTimer() {
     state.totalTimeSec += elapsed;
     state._lastSessionDur = elapsed; // available for endStudy to store in entry
     state.sessionLog.push({ date: new Date().toISOString(), durationSec: elapsed });
-    state.sessionLog = state.sessionLog.slice(-50);
+    state.sessionLog = state.sessionLog.slice(-1000);
     saveState();
   }
   state.sessionStartTs = null;
@@ -15447,7 +15486,7 @@ function saveCurrentSessionTime() {
     localStorage.setItem('cia_daquin_v2', JSON.stringify({
       history: state.history,
       totalTimeSec: state.totalTimeSec + elapsed,
-      sessionLog: state.sessionLog.slice(-50),
+      sessionLog: state.sessionLog.slice(-1000),
       sectionHistory: state.sectionHistory
     }));
   } catch(e) {}
@@ -15458,7 +15497,7 @@ function logSession(mode) {
   if (elapsed < 10) return;
   state.totalTimeSec += elapsed;
   state.sessionLog.push({ date: new Date().toISOString(), durationSec: elapsed, mode: mode });
-  state.sessionLog = state.sessionLog.slice(-50);
+  state.sessionLog = state.sessionLog.slice(-1000);
   state.sessionStartTs = Date.now();
   saveState();
 }
@@ -16171,7 +16210,22 @@ function saveMockHistory(mockId, result) {
     hist[mockId].unshift(result);
     if (hist[mockId].length > 15) hist[mockId] = hist[mockId].slice(0, 15);
     localStorage.setItem('cia_mock_history', JSON.stringify(hist));
-  } catch(e) {}
+  } catch(e) {
+    console.error('saveMockHistory a échoué :', e);
+    // Tentative de repli : sauvegarder sans le mockLog (souvent la cause d'un dépassement de quota)
+    try {
+      const hist = JSON.parse(localStorage.getItem('cia_mock_history') || '{}');
+      if (!hist[mockId]) hist[mockId] = [];
+      const light = Object.assign({}, result); delete light.mockLog;
+      hist[mockId].unshift(light);
+      if (hist[mockId].length > 15) hist[mockId] = hist[mockId].slice(0, 15);
+      localStorage.setItem('cia_mock_history', JSON.stringify(hist));
+      alert('Mock enregistré, mais le détail des questions n\'a pas pu être conservé (espace de stockage insuffisant).');
+    } catch(e2) {
+      console.error('Repli saveMockHistory a aussi échoué :', e2);
+      alert('Impossible d\'enregistrer le résultat du mock (stockage local plein ou indisponible).');
+    }
+  }
 }
 
 function getMockHistory(mockId) {
@@ -16276,6 +16330,7 @@ function mockStart(mockId) {
     mState.timerSec = MOCK_DURATION;
   }
 
+  mState._sessionElapsed = 0;
   mockStartTimer();
   showPage('mock-mode');
   mockRender();
@@ -16287,10 +16342,16 @@ function mockStartTimer() {
   mState.timerInterval = setInterval(() => {
     if (mState.reviewMode) return;
     mState.timerSec--;
+    // Comptabilisation du temps AU FUR ET À MESURE (comme étude / examen blanc)
+    state.totalTimeSec = (state.totalTimeSec || 0) + 1;
+    mState._sessionElapsed = (mState._sessionElapsed || 0) + 1;
     saveMockState();
+    // Persister le total global régulièrement (toutes les 5s)
+    if (mState.timerSec % 5 === 0) saveState();
     mockUpdateTimer();
     if (mState.timerSec <= 0) {
       clearInterval(mState.timerInterval);
+      saveState();
       mockFinish(true);
     }
   }, 1000);
@@ -16484,16 +16545,15 @@ function mockFinish(timeUp) {
       timeSec: timeTaken,
       mockLog
     });
-    // Comptabiliser le temps mock dans le total global
-    state.totalTimeSec = (state.totalTimeSec || 0) + timeTaken;
+    // ⚠ Le temps est déjà comptabilisé seconde par seconde dans state.totalTimeSec
+    // (voir mockStartTimer) — on ne le ré-ajoute donc PAS ici pour éviter le double comptage.
     saveState();
     clearMockSession(mState.mockId);
-  } else {
-    // Retry/révision des ratés : comptabiliser le temps aussi
-    const retryTime = MOCK_DURATION - mState.timerSec;
-    state.totalTimeSec = (state.totalTimeSec || 0) + retryTime;
-    saveState();
+    // Rafraîchir les écrans qui dépendent de l'historique
+    if (typeof renderSidebar === 'function') renderSidebar();
   }
+  // (Le retry/révision des ratés ne crée pas d'entrée d'historique ; son temps est
+  //  lui aussi déjà comptabilisé en direct.)
 
   // Afficher la page résultats
   document.getElementById('mock-sum-title').textContent =
@@ -16570,6 +16630,7 @@ function mockRetryWrong() {
       <button id="mdf-all" onclick="filterMockDetail('all')" style="padding:7px 16px;border-radius:8px;border:2px solid var(--accent);background:var(--accent);color:#fff;font-size:13px;font-weight:700;cursor:pointer">Toutes</button>
       <button id="mdf-ok" onclick="filterMockDetail('ok')" style="padding:7px 16px;border-radius:8px;border:2px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-weight:700;cursor:pointer">✅ Réussies</button>
       <button id="mdf-err" onclick="filterMockDetail('err')" style="padding:7px 16px;border-radius:8px;border:2px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-weight:700;cursor:pointer">❌ Ratées</button>
+      <button onclick="mockRetryFromHistory(_mdmMockId,_mdmIdx)" style="margin-left:auto;padding:7px 14px;border-radius:8px;border:none;background:#f97316;color:#fff;font-size:13px;font-weight:700;cursor:pointer">🎯 Reprendre les ratés</button>
     </div>
     <div id="mdm-list" style="display:flex;flex-direction:column;gap:16px"></div>
   </div>
