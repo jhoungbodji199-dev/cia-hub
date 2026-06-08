@@ -3276,7 +3276,7 @@ function driveLogin() {
 function _driveStartAuth() {
   // CLIENT ID public (pas de secret côté client pour OAuth implicite)
   // L'utilisateur doit coller son propre Client ID ci-dessous.
-  const CLIENT_ID = localStorage.getItem('ciaDriveClientId') || '';
+  const CLIENT_ID = localStorage.getItem('ciaDriveClientId') || '351870287508-mpgb979e45hhe7r74kcjclhdtmfachfp.apps.googleusercontent.com';
   if (!CLIENT_ID) {
     const id = prompt(
       'Pour activer la sync Google Drive, entre ton Google OAuth Client ID.\n\n' +
